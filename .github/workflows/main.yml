@@ -1,4 +1,4 @@
-name: win 11 + tailscale + Download.bat script 
+name: win 11 + tailscale + Download.bat script
 
 on:
   workflow_dispatch:
@@ -11,36 +11,34 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication (if needed)
+          # Enable Remote Desktop (NLA kept ON for security)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                             -Name "fDenyTSConnections" -Value 0 -Force
+                           -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+                           -Name "UserAuthentication" -Value 1 -Force
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-         
-          # For testing, allow any incoming connection on port 3389
+          # Remove any existing rule with the same name
+          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
+
+          # Allow RDP only from Tailscale CGNAT range
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
+            dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10
 
-          # (Optional) Restart the Remote Desktop service to ensure changes take effect
           Restart-Service -Name TermService -Force
 
       - name: Create RDP User with Fixed Password
         run: |
-          $password = "MR.English2008"
+          $password = "${{ secrets.RDP_PASSWORD }}"
+          echo "::add-mask::$password"
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
               New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           }
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-         
+
           echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-         
+
           if (-not (Get-LocalUser -Name "RDP")) {
               Write-Error "User creation failed"
               exit 1
@@ -50,17 +48,15 @@ jobs:
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-         
+
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
       - name: Establish Tailscale Connection
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
           & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-         
-          # Wait for Tailscale to assign an IP
+
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
@@ -68,18 +64,16 @@ jobs:
               Start-Sleep -Seconds 5
               $retries++
           }
-         
+
           if (-not $tsIP) {
               Write-Error "Tailscale IP not assigned. Exiting."
               exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-     
+
       - name: Verify RDP Accessibility
         run: |
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-         
-          # Test connectivity using Test-NetConnection against the Tailscale IP on port 3389
           $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
           if (-not $testResult.TcpTestSucceeded) {
               Write-Error "TCP connection to RDP port 3389 failed"
@@ -87,12 +81,12 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Maintain Connection + Watch RDP User
+      - name: Watch RDP User + Run Downloads.bat
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
           Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "Password: $env:RDP_CREDS"
           Write-Host "==================`n"
 
           $rdpProfile = "C:\Users\RDP"
@@ -100,48 +94,53 @@ jobs:
           $downloadUrl = "https://gitlab.com/MR.English2008/pcme_rdp/-/raw/main/Downloads.bat"
           $downloadPath = "$startupPath\Downloads.bat"
 
-          while ($true) {
-              if (Test-Path $rdpProfile) {
-                  try {
-                      if (-not (Test-Path $startupPath)) {
-                          New-Item -ItemType Directory -Path $startupPath -Force | Out-Null
-                      }
-
-                      Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
-                      Write-Host "✅ Downloads.bat copied to $downloadPath"
-
-                      # Run the batch file for the first time
-                      cmd /c $downloadPath
-                      Write-Host "✅ Downloads.bat executed successfully"
-                      break
-                  }
-                  catch {
-                      Write-Host "❌ Error copying or executing Downloads.bat: $($_.Exception.Message)"
-                      break
-                  }
-              }
-              else {
-                  Write-Host "[$(Get-Date)] Waiting for RDP profile to be created..."
-                  Start-Sleep -Seconds 30
-              }
+          # Wait up to 15 minutes for RDP profile to appear
+          $waited = 0
+          while (-not (Test-Path $rdpProfile) -and $waited -lt 30) {
+              Write-Host "[$(Get-Date)] Waiting for RDP profile to be created..."
+              Start-Sleep -Seconds 30
+              $waited++
           }
-# Open Microsoft Edge and navigate to Roblox
-$edgePath = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
 
-if (-not (Test-Path $edgePath)) {
-    $edgePath = "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
-}
+          if (Test-Path $rdpProfile) {
+              try {
+                  if (-not (Test-Path $startupPath)) {
+                      New-Item -ItemType Directory -Path $startupPath -Force | Out-Null
+                  }
+                  Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
+                  Write-Host "✅ Downloads.bat copied to $downloadPath"
+                  cmd /c $downloadPath
+                  Write-Host "✅ Downloads.bat executed successfully"
+              }
+              catch {
+                  Write-Host "❌ Error copying or executing Downloads.bat: $($_.Exception.Message)"
+              }
+          } else {
+              Write-Host "⚠️ RDP profile not created within timeout — skipping Downloads.bat"
+          }
 
-if (Test-Path $edgePath) {
-    Start-Process -FilePath $edgePath -ArgumentList "https://www.roblox.com"
-    Write-Host "Microsoft Edge opened Roblox successfully!"
-}
-else {
-    Write-Host "Microsoft Edge was not found."
-}
+      - name: Open Microsoft Edge to Roblox
+        run: |
+          $edgePath = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+          if (-not (Test-Path $edgePath)) {
+              $edgePath = "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
+          }
+          if (Test-Path $edgePath) {
+              Start-Process -FilePath $edgePath -ArgumentList "https://www.roblox.com"
+              Write-Host "✅ Microsoft Edge opened Roblox successfully!"
+          } else {
+              Write-Host "❌ Microsoft Edge was not found."
+          }
 
-          # Keep runner alive
+      - name: Keep Runner Alive
+        run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
+              Write-Host "[$(Get-Date)] RDP Active - Use Cancel in GitHub UI to terminate"
               Start-Sleep -Seconds 300
           }
+
+      - name: Cleanup Tailscale
+        if: always()
+        run: |
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" logout 2>$null
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" down 2>$null
