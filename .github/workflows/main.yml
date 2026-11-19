@@ -1,4 +1,5 @@
-name: win 11 + tailscale + Download.bat script
+
+name: Windows + Tailscale + Roblox
 
 on:
   workflow_dispatch:
@@ -9,132 +10,78 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: Configure Core RDP Settings
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
-                           -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                           -Name "UserAuthentication" -Value 1 -Force
-
-          netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10
-
-          Restart-Service -Name TermService -Force
-
-      - name: Create RDP User with Fixed Password
-        run: |
-          $password = "${{ secrets.RDP_PASSWORD }}"
-          echo "::add-mask::$password"
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          }
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
-
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
-
-          if (-not (Get-LocalUser -Name "RDP")) {
-              Write-Error "User creation failed"
-              exit 1
-          }
-
       - name: Install Tailscale
+        shell: powershell
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
 
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
+
+          Start-Process msiexec.exe `
+            -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" `
+            -Wait
+
           Remove-Item $installerPath -Force
 
-      - name: Establish Tailscale Connection
+      - name: Connect Tailscale
+        shell: powershell
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTHKEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (-not $env:TS_AUTHKEY) {
+            throw "TAILSCALE_AUTHKEY secret is missing."
+          }
+
+          & $tsExe up `
+            --authkey=$env:TS_AUTHKEY `
+            --hostname="gh-runner-$env:GITHUB_RUN_ID"
 
           $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
+
+          for ($i = 0; $i -lt 12; $i++) {
+            $tsIP = & $tsExe ip -4
+
+            if ($tsIP) {
+              break
+            }
+
+            Start-Sleep -Seconds 5
           }
 
           if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
+            throw "Tailscale IP was not assigned."
           }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Verify RDP Accessibility
+          Write-Host "Tailscale IP: $tsIP"
+
+      - name: Open Roblox in Microsoft Edge
+        shell: powershell
         run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "TCP connectivity successful!"
+          $edgePaths = @(
+            "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+            "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
+          )
 
-      - name: Maintain Connection + Watch RDP User + Open Roblox
+          $edgePath = $edgePaths |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+
+          if (-not $edgePath) {
+            throw "Microsoft Edge was not found."
+          }
+
+          Start-Process -FilePath $edgePath `
+            -ArgumentList "https://www.roblox.com"
+
+          Write-Host "Roblox opened in Microsoft Edge."
+
+      - name: Keep Runner Alive
+        shell: powershell
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $env:RDP_CREDS"
-          Write-Host "==================`n"
-
-          $rdpProfile = "C:\Users\RDP"
-          $startupPath = "$rdpProfile\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
-          $downloadUrl = "https://gitlab.com/MR.English2008/pcme_rdp/-/raw/main/Downloads.bat"
-          $downloadPath = "$startupPath\Downloads.bat"
-
-          # Wait up to 15 minutes for RDP profile
-          $waited = 0
-          while (-not (Test-Path $rdpProfile) -and $waited -lt 30) {
-              Write-Host "[$(Get-Date)] Waiting for RDP profile to be created..."
-              Start-Sleep -Seconds 30
-              $waited++
-          }
-
-          if (Test-Path $rdpProfile) {
-              try {
-                  if (-not (Test-Path $startupPath)) {
-                      New-Item -ItemType Directory -Path $startupPath -Force | Out-Null
-                  }
-                  Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
-                  Write-Host "✅ Downloads.bat copied to $downloadPath"
-                  cmd /c $downloadPath
-                  Write-Host "✅ Downloads.bat executed successfully"
-              }
-              catch {
-                  Write-Host "❌ Error copying or executing Downloads.bat: $($_.Exception.Message)"
-              }
-          } else {
-              Write-Host "⚠️ RDP profile not created within timeout — skipping Downloads.bat"
-          }
-
-          # === Open Microsoft Edge to Roblox ===
-          $edgePath = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
-          if (-not (Test-Path $edgePath)) {
-              $edgePath = "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
-          }
-          if (Test-Path $edgePath) {
-              Start-Process -FilePath $edgePath -ArgumentList "https://www.roblox.com"
-              Write-Host "✅ Microsoft Edge opened Roblox successfully!"
-          } else {
-              Write-Host "❌ Microsoft Edge was not found."
-          }
-
-          # Keep runner alive
           while ($true) {
-              Write-Host "[$(Get-Date)] RDP Active - Use Cancel in GitHub UI to terminate"
-              Start-Sleep -Seconds 300
+            Write-Host "[$(Get-Date)] Windows Runner is active."
+            Start-Sleep -Seconds 300
           }
-
-      - name: Cleanup Tailscale
-        if: always()
-        run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" logout 2>$null
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" down 2>$null
