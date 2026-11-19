@@ -11,16 +11,12 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop (NLA kept ON for security)
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                            -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                            -Name "UserAuthentication" -Value 1 -Force
 
-          # Remove any existing rule with the same name
           netsh advfirewall firewall delete rule name="RDP-Tailscale" 2>$null
-
-          # Allow RDP only from Tailscale CGNAT range
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389 remoteip=100.64.0.0/10
 
@@ -81,7 +77,7 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Watch RDP User + Run Downloads.bat
+      - name: Maintain Connection + Watch RDP User + Open Roblox
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
@@ -94,7 +90,7 @@ jobs:
           $downloadUrl = "https://gitlab.com/MR.English2008/pcme_rdp/-/raw/main/Downloads.bat"
           $downloadPath = "$startupPath\Downloads.bat"
 
-          # Wait up to 15 minutes for RDP profile to appear
+          # Wait up to 15 minutes for RDP profile
           $waited = 0
           while (-not (Test-Path $rdpProfile) -and $waited -lt 30) {
               Write-Host "[$(Get-Date)] Waiting for RDP profile to be created..."
@@ -119,8 +115,7 @@ jobs:
               Write-Host "⚠️ RDP profile not created within timeout — skipping Downloads.bat"
           }
 
-      - name: Open Microsoft Edge to Roblox
-        run: |
+          # === Open Microsoft Edge to Roblox ===
           $edgePath = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
           if (-not (Test-Path $edgePath)) {
               $edgePath = "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
@@ -132,8 +127,7 @@ jobs:
               Write-Host "❌ Microsoft Edge was not found."
           }
 
-      - name: Keep Runner Alive
-        run: |
+          # Keep runner alive
           while ($true) {
               Write-Host "[$(Get-Date)] RDP Active - Use Cancel in GitHub UI to terminate"
               Start-Sleep -Seconds 300
