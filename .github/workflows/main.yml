@@ -131,3 +131,17 @@ jobs:
               Write-Host "[$(Get-Date)] RDP Active - Use Ctrl+C in workflow to terminate"
               Start-Sleep -Seconds 300
           }
+# Open Microsoft Edge and navigate to Roblox
+$edgePath = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe"
+
+if (-not (Test-Path $edgePath)) {
+    $edgePath = "$env:ProgramFiles\Microsoft\Edge\Application\msedge.exe"
+}
+
+if (Test-Path $edgePath) {
+    Start-Process -FilePath $edgePath -ArgumentList "https://www.roblox.com"
+    Write-Host "Microsoft Edge opened Roblox successfully!"
+}
+else {
+    Write-Host "Microsoft Edge was not found."
+}
